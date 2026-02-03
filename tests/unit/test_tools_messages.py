@@ -219,7 +219,7 @@ class TestWaitForReplyTool:
 
         result = tool_fn(
             thread_id="123456789",
-            timeout_minutes=1,
+            remind_double_text=True,
             poll_interval_seconds=3,
             double_text_grace_period_seconds=10,
         )
@@ -251,7 +251,7 @@ class TestWaitForReplyTool:
         tool_fn = self._get_tool_fn("wait_for_reply")
         result = tool_fn(
             thread_id="123456789",
-            timeout_minutes=1,
+            remind_double_text=True,
             poll_interval_seconds=3,
             double_text_grace_period_seconds=10,
         )
@@ -264,12 +264,12 @@ class TestWaitForReplyTool:
 
     @patch("instagram_mcp.tools.messages.time.sleep")
     @patch("instagram_mcp.tools.messages.time.time")
-    def test_wait_for_reply_timeout(
+    def test_wait_for_reply_checkpoint_with_hint(
         self, mock_time: MagicMock, mock_sleep: MagicMock
     ) -> None:
-        """Test timeout when no reply received."""
-        # Simulate time passing until timeout
-        mock_time.side_effect = [0, 30, 61]  # Third call exceeds 60s timeout
+        """Test checkpoint behavior with double-text hint (remind_double_text=True)."""
+        # Simulate time passing until 5 min timeout (300 seconds)
+        mock_time.side_effect = [0, 150, 301]  # Third call exceeds 5 min
 
         baseline_msg = self._create_message("100", "Hello", is_sent_by_viewer=True)
         self.mock_client.get_messages.return_value = [baseline_msg]
@@ -277,13 +277,39 @@ class TestWaitForReplyTool:
         tool_fn = self._get_tool_fn("wait_for_reply")
         result = tool_fn(
             thread_id="123456789",
-            timeout_minutes=1,
+            remind_double_text=True,  # Short timeout with hint
+            poll_interval_seconds=3,
+            double_text_grace_period_seconds=10,
+        )
+
+        assert result["waiting"] is True
+        assert "hint" in result
+        assert "double-text" in result["hint"].lower() or "follow-up" in result["hint"]
+        assert result["waited_minutes"] == 5
+
+    @patch("instagram_mcp.tools.messages.time.sleep")
+    @patch("instagram_mcp.tools.messages.time.time")
+    def test_wait_for_reply_long_timeout(
+        self, mock_time: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        """Test long timeout behavior (remind_double_text=False)."""
+        # Simulate very long wait - 999 minutes = 59940 seconds
+        mock_time.side_effect = [0, 30000, 59941]  # Exceeds 999 min
+
+        baseline_msg = self._create_message("100", "Hello", is_sent_by_viewer=True)
+        self.mock_client.get_messages.return_value = [baseline_msg]
+
+        tool_fn = self._get_tool_fn("wait_for_reply")
+        result = tool_fn(
+            thread_id="123456789",
+            remind_double_text=False,  # Long timeout, no hint
             poll_interval_seconds=3,
             double_text_grace_period_seconds=10,
         )
 
         assert result["timeout"] is True
-        assert "No reply received" in result["message"]
+        assert "waited_minutes" in result
+        assert result["waited_minutes"] == 999
 
     @patch("instagram_mcp.tools.messages.time.sleep")
     @patch("instagram_mcp.tools.messages.time.time")
@@ -307,7 +333,7 @@ class TestWaitForReplyTool:
         tool_fn = self._get_tool_fn("wait_for_reply")
         result = tool_fn(
             thread_id="123456789",
-            timeout_minutes=1,
+            remind_double_text=True,
             poll_interval_seconds=3,
             double_text_grace_period_seconds=10,
         )
@@ -321,7 +347,7 @@ class TestWaitForReplyTool:
         self.mock_client.get_messages.side_effect = Exception("Connection failed")
 
         tool_fn = self._get_tool_fn("wait_for_reply")
-        result = tool_fn(thread_id="123456789", timeout_minutes=1)
+        result = tool_fn(thread_id="123456789", remind_double_text=True)
 
         assert "error" in result
         assert "Connection failed" in result["error"]

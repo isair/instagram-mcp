@@ -150,30 +150,43 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
     @mcp.tool()
     def wait_for_reply(
         thread_id: str,
-        timeout_minutes: int = 30,
+        remind_double_text: bool = True,
         poll_interval_seconds: int = 3,
         double_text_grace_period_seconds: int = 10,
     ) -> dict[str, Any]:
-        """Wait for new messages in a thread. Blocks until reply arrives or timeout.
+        """Wait for new messages in a thread. Blocks until reply arrives or checkpoint.
 
         This tool polls Instagram for new messages and waits for the other person
         to respond. Once a response is detected, it waits an additional grace period
         to catch double/triple texts, then returns all new messages at once.
 
-        Perfect for having natural conversations - call this after sending a message
-        to wait for their reply before responding.
+        Perfect for autonomous conversations - use the remind_double_text parameter
+        to control checkpoint behavior:
+
+        - remind_double_text=True (default): Waits ~5 minutes, then returns with a
+          hint suggesting you might want to double-text. You can then either:
+          1. Send a follow-up message and call wait_for_reply again, OR
+          2. Call wait_for_reply with remind_double_text=False to keep waiting
+
+        - remind_double_text=False: Waits up to 999 minutes (basically forever).
+          Use this when you've decided NOT to double-text and just want to wait.
 
         Args:
             thread_id: ID of the thread to monitor.
-            timeout_minutes: Maximum time to wait for a reply (default: 30).
+            remind_double_text: If True, short timeout (~5 min) with double-text hint.
+                If False, long timeout (999 min) for patient waiting. Default: True.
             poll_interval_seconds: How often to check for new messages (default: 3).
             double_text_grace_period_seconds: Extra wait time after first reply
                 to catch rapid follow-up messages (default: 10).
 
         Returns:
-            Object with 'success', 'new_messages' array, 'waited_seconds',
-            or 'timeout' if no reply received in time.
+            On reply: Object with 'success', 'new_messages' array, 'waited_seconds'.
+            On checkpoint (remind_double_text=True): Object with 'waiting', 'hint',
+                'waited_minutes' suggesting to double-text or keep waiting.
+            On timeout (remind_double_text=False): Object with 'timeout', 'waited_minutes'.
         """
+        # Short timeout for checkpoints, long timeout for patient waiting
+        timeout_minutes = 5 if remind_double_text else 999
         try:
             # Get current messages to establish baseline
             current_messages = client.get_messages(thread_id=thread_id, amount=10)
@@ -199,12 +212,34 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
 
                 # Check for timeout
                 if elapsed >= timeout_seconds:
-                    return {
-                        "timeout": True,
-                        "thread_id": thread_id,
-                        "waited_seconds": int(elapsed),
-                        "message": f"No reply received within {timeout_minutes} minutes",
-                    }
+                    waited_minutes = int(elapsed / 60)
+                    if remind_double_text:
+                        # Checkpoint - suggest double-texting
+                        return {
+                            "waiting": True,
+                            "thread_id": thread_id,
+                            "waited_minutes": waited_minutes,
+                            "hint": (
+                                f"No response for {waited_minutes} minutes. "
+                                "Consider: (1) Send a follow-up message if contextually "
+                                "appropriate, then call wait_for_reply again. "
+                                "(2) If double-texting doesn't fit the vibe, call "
+                                "wait_for_reply with remind_double_text=False to keep "
+                                "waiting patiently."
+                            ),
+                        }
+                    else:
+                        # True timeout after long wait
+                        return {
+                            "timeout": True,
+                            "thread_id": thread_id,
+                            "waited_minutes": waited_minutes,
+                            "message": (
+                                f"No reply received after {waited_minutes} minutes of "
+                                "patient waiting. You may want to try again later or "
+                                "send a new message to restart the conversation."
+                            ),
+                        }
 
                 # Poll for new messages
                 messages = client.get_messages(thread_id=thread_id, amount=10)
