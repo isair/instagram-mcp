@@ -87,6 +87,111 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
             logger.exception("Error replying to thread %s", thread_id)
             return {"error": str(e), "thread_id": thread_id}
 
+    @mcp.tool(annotations={"destructive": True})
+    def send_and_check(
+        thread_id: str,
+        text: str,
+        sync_timeout_seconds: int = 15,
+    ) -> dict[str, Any]:
+        """Send a message, sync, and check for interjections. Use for natural double-texting.
+
+        This is the preferred tool for sending messages during active conversations.
+        It combines three operations atomically:
+        1. Send your message
+        2. Sync (wait until your message is visible in the thread)
+        3. Check if they sent anything while you were typing/sending
+
+        Use this for natural double/triple texting:
+        - send_and_check("bro what is that 💀")  -> no interjection, continue
+        - send_and_check("where did you get that from")  -> interjection! they said "wait"
+        - Now decide: engage with their "wait" or continue your thought
+
+        Args:
+            thread_id: ID of the thread to send to.
+            text: Message text to send.
+            sync_timeout_seconds: Max time to wait for sync (default: 15).
+
+        Returns:
+            success: Whether message was sent and synced.
+            message_id: ID of the sent message.
+            has_interjection: True if they sent something since you started.
+            interjection: Their message if has_interjection, else None.
+            recent_messages: Last 5 messages for context.
+        """
+        try:
+            # 1. Get baseline BEFORE sending (their latest message timestamp)
+            pre_send_messages = client.get_messages(thread_id=thread_id, amount=5)
+            baseline_timestamp = None
+            for msg in pre_send_messages:
+                if not msg.is_sent_by_viewer:
+                    baseline_timestamp = msg.timestamp
+                    break
+
+            # 2. Send the message
+            message = client.reply_to_thread(thread_id=thread_id, text=text)
+            if not message:
+                return {"success": False, "error": "Failed to send message"}
+
+            sent_message_id = message.message_id
+            logger.info("Sent message %s, syncing...", sent_message_id)
+
+            # 3. Sync: poll until our message is visible
+            sync_start = time.time()
+            synced = False
+            while time.time() - sync_start < sync_timeout_seconds:
+                messages = client.get_messages(thread_id=thread_id, amount=10)
+                for msg in messages:
+                    if msg.message_id == sent_message_id:
+                        synced = True
+                        break
+                if synced:
+                    break
+                time.sleep(0.5)
+
+            if not synced:
+                logger.warning("Sync timeout for message %s", sent_message_id)
+
+            # 4. Check for interjections (messages from them after baseline)
+            post_send_messages = client.get_messages(thread_id=thread_id, amount=10)
+            interjections = []
+            for msg in post_send_messages:
+                if msg.is_sent_by_viewer:
+                    continue  # Skip our messages
+                if baseline_timestamp and msg.timestamp <= baseline_timestamp:
+                    continue  # Skip messages before our baseline
+                interjections.append(msg)
+
+            # Build recent messages for context (last 5, oldest first)
+            recent = post_send_messages[:5]
+            recent.reverse()
+
+            return {
+                "success": True,
+                "message_id": sent_message_id,
+                "thread_id": thread_id,
+                "text": text,
+                "synced": synced,
+                "has_interjection": len(interjections) > 0,
+                "interjection": {
+                    "message_id": interjections[0].message_id,
+                    "sender": interjections[0].sender.username,
+                    "text": interjections[0].content.text,
+                    "timestamp": interjections[0].timestamp.isoformat(),
+                } if interjections else None,
+                "recent_messages": [
+                    {
+                        "sender": m.sender.username,
+                        "text": m.content.text,
+                        "is_sent_by_viewer": m.is_sent_by_viewer,
+                    }
+                    for m in recent
+                ],
+            }
+
+        except Exception as e:
+            logger.exception("Error in send_and_check for thread %s", thread_id)
+            return {"error": str(e), "thread_id": thread_id}
+
     @mcp.tool()
     def get_messages(thread_id: str, amount: int = 20) -> dict[str, Any]:
         """Get messages from a thread.
@@ -156,9 +261,8 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
     ) -> dict[str, Any]:
         """Wait for new messages in a thread. Blocks until reply arrives or timeout.
 
-        This tool polls Instagram for new messages and waits for the other person
-        to respond. Once a response is detected, it waits an additional grace period
-        to catch double/triple texts, then returns all new messages at once.
+        This tool first SYNCS (ensures our latest message is visible), then polls
+        for new messages using TIMESTAMP-based detection to avoid race conditions.
 
         Use variable timeout_minutes based on your strategy:
         - 5 minutes: Quick checkpoint, good for active conversations
@@ -179,23 +283,31 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
             On timeout: Object with 'timeout', 'waited_minutes'.
         """
         try:
-            # Get current messages to establish baseline
-            current_messages = client.get_messages(thread_id=thread_id, amount=10)
+            # SYNC PHASE: Poll until our latest message is visible and get its timestamp
+            # This ensures we're in sync with Instagram's state before waiting
+            sync_start = time.time()
+            baseline_timestamp = None
+            sync_attempts = 0
 
-            # Find OUR latest sent message as baseline (not the newest overall)
-            # This prevents a race condition where they send a message while we're
-            # responding - if we used the newest message overall as baseline, we'd
-            # miss their message because it would BE the baseline
-            our_last_message_id = None
-            for msg in current_messages:
-                if msg.is_sent_by_viewer:
-                    our_last_message_id = msg.message_id
+            while time.time() - sync_start < 30:  # 30 sec sync timeout
+                sync_attempts += 1
+                current_messages = client.get_messages(thread_id=thread_id, amount=10)
+
+                # Find OUR latest sent message's TIMESTAMP as baseline
+                for msg in current_messages:
+                    if msg.is_sent_by_viewer:
+                        baseline_timestamp = msg.timestamp
+                        break
+
+                if baseline_timestamp:
                     break
+                time.sleep(1)
 
             logger.info(
-                "Waiting for reply in thread %s (baseline: our msg %s)",
+                "Waiting for reply in thread %s (baseline timestamp: %s, synced in %d attempts)",
                 thread_id,
-                our_last_message_id,
+                baseline_timestamp,
+                sync_attempts,
             )
 
             timeout_seconds = timeout_minutes * 60
@@ -217,15 +329,18 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
                 # Poll for new messages
                 messages = client.get_messages(thread_id=thread_id, amount=10)
 
-                # Find new messages (not from us, newer than our last message)
+                # Find new messages using TIMESTAMP comparison
+                # This catches all messages from them sent AFTER our baseline,
+                # regardless of how Instagram orders the message list
                 new_messages = []
                 for msg in messages:
-                    # Stop if we hit our baseline (our last sent message)
-                    if our_last_message_id and msg.message_id == our_last_message_id:
-                        break
-                    # Only include messages NOT from us
-                    if not msg.is_sent_by_viewer:
-                        new_messages.append(msg)
+                    # Skip our own messages
+                    if msg.is_sent_by_viewer:
+                        continue
+                    # Skip messages at or before our baseline timestamp
+                    if baseline_timestamp and msg.timestamp <= baseline_timestamp:
+                        continue
+                    new_messages.append(msg)
 
                 if new_messages:
                     # First new message detected
@@ -240,8 +355,8 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
                     grace_elapsed = time.time() - first_new_message_time
                     if grace_elapsed >= double_text_grace_period_seconds:
                         # Grace period done, return all new messages
-                        # Reverse so oldest is first (natural reading order)
-                        new_messages.reverse()
+                        # Sort by timestamp (oldest first) for natural reading order
+                        new_messages.sort(key=lambda m: m.timestamp)
 
                         return {
                             "success": True,

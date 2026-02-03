@@ -182,6 +182,7 @@ class TestWaitForReplyTool:
         text: str,
         is_sent_by_viewer: bool = False,
         username: str = "other_user",
+        timestamp: datetime | None = None,
     ) -> DirectMessage:
         """Create a mock DirectMessage for testing."""
         return DirectMessage(
@@ -189,7 +190,7 @@ class TestWaitForReplyTool:
             thread_id="123456789",
             sender=ThreadUser(user_id="999", username=username),
             content=MessageContent(text=text, media_type=MediaType.TEXT),
-            timestamp=datetime(2024, 1, 15, 10, 30, 0),
+            timestamp=timestamp or datetime(2024, 1, 15, 10, 30, 0),
             is_sent_by_viewer=is_sent_by_viewer,
         )
 
@@ -199,16 +200,23 @@ class TestWaitForReplyTool:
         self, mock_time: MagicMock, mock_sleep: MagicMock
     ) -> None:
         """Test successful detection of new reply."""
-        # Simulate time progression: start, poll 1, poll 2 (message found), grace period
-        mock_time.side_effect = [0, 3, 6, 6, 17]  # Extra calls for grace period check
+        # Use a counter for time.time() - sync phase + main loop needs many calls
+        time_values = iter([0, 0, 0, 3, 6, 6, 17, 17])
+        mock_time.side_effect = lambda: next(time_values)
 
-        # First call: baseline (our last message)
-        baseline_msg = self._create_message("100", "Hello", is_sent_by_viewer=True)
-        # Second call: new message from other person
-        new_msg = self._create_message("101", "Hey there!", is_sent_by_viewer=False)
+        # Our baseline message (timestamp T0)
+        baseline_msg = self._create_message(
+            "100", "Hello", is_sent_by_viewer=True,
+            timestamp=datetime(2024, 1, 15, 10, 0, 0)
+        )
+        # Their new message (timestamp > T0)
+        new_msg = self._create_message(
+            "101", "Hey there!", is_sent_by_viewer=False,
+            timestamp=datetime(2024, 1, 15, 10, 1, 0)
+        )
 
         self.mock_client.get_messages.side_effect = [
-            [baseline_msg],  # Initial baseline
+            [baseline_msg],  # Sync phase - finds our baseline
             [baseline_msg],  # First poll - no new messages
             [new_msg, baseline_msg],  # Second poll - new message!
             [new_msg, baseline_msg],  # Grace period poll
@@ -235,14 +243,24 @@ class TestWaitForReplyTool:
         self, mock_time: MagicMock, mock_sleep: MagicMock
     ) -> None:
         """Test catching double texts within grace period."""
-        mock_time.side_effect = [0, 3, 3, 8, 8, 15]
+        time_values = iter([0, 0, 0, 3, 3, 8, 8, 15, 15])
+        mock_time.side_effect = lambda: next(time_values)
 
-        baseline_msg = self._create_message("100", "Hello", is_sent_by_viewer=True)
-        msg1 = self._create_message("101", "Hey!", is_sent_by_viewer=False)
-        msg2 = self._create_message("102", "Also...", is_sent_by_viewer=False)
+        baseline_msg = self._create_message(
+            "100", "Hello", is_sent_by_viewer=True,
+            timestamp=datetime(2024, 1, 15, 10, 0, 0)
+        )
+        msg1 = self._create_message(
+            "101", "Hey!", is_sent_by_viewer=False,
+            timestamp=datetime(2024, 1, 15, 10, 1, 0)
+        )
+        msg2 = self._create_message(
+            "102", "Also...", is_sent_by_viewer=False,
+            timestamp=datetime(2024, 1, 15, 10, 2, 0)
+        )
 
         self.mock_client.get_messages.side_effect = [
-            [baseline_msg],  # Initial
+            [baseline_msg],  # Sync phase
             [msg1, baseline_msg],  # First message detected
             [msg2, msg1, baseline_msg],  # Second message during grace period
             [msg2, msg1, baseline_msg],  # Grace period done
@@ -268,10 +286,14 @@ class TestWaitForReplyTool:
         self, mock_time: MagicMock, mock_sleep: MagicMock
     ) -> None:
         """Test short timeout behavior (5 minutes)."""
-        # Simulate time passing until 5 min timeout (300 seconds)
-        mock_time.side_effect = [0, 150, 301]  # Third call exceeds 5 min
+        # Sync phase uses time.time() for timeout check, main loop for elapsed
+        time_values = iter([0, 0, 0, 150, 301])
+        mock_time.side_effect = lambda: next(time_values)
 
-        baseline_msg = self._create_message("100", "Hello", is_sent_by_viewer=True)
+        baseline_msg = self._create_message(
+            "100", "Hello", is_sent_by_viewer=True,
+            timestamp=datetime(2024, 1, 15, 10, 0, 0)
+        )
         self.mock_client.get_messages.return_value = [baseline_msg]
 
         tool_fn = self._get_tool_fn("wait_for_reply")
@@ -291,10 +313,13 @@ class TestWaitForReplyTool:
         self, mock_time: MagicMock, mock_sleep: MagicMock
     ) -> None:
         """Test long timeout behavior (e.g., 120 minutes cooldown)."""
-        # Simulate 2 hour wait - 120 minutes = 7200 seconds
-        mock_time.side_effect = [0, 3600, 7201]  # Exceeds 120 min
+        time_values = iter([0, 0, 0, 3600, 7201])
+        mock_time.side_effect = lambda: next(time_values)
 
-        baseline_msg = self._create_message("100", "Hello", is_sent_by_viewer=True)
+        baseline_msg = self._create_message(
+            "100", "Hello", is_sent_by_viewer=True,
+            timestamp=datetime(2024, 1, 15, 10, 0, 0)
+        )
         self.mock_client.get_messages.return_value = [baseline_msg]
 
         tool_fn = self._get_tool_fn("wait_for_reply")
@@ -315,14 +340,26 @@ class TestWaitForReplyTool:
         self, mock_time: MagicMock, mock_sleep: MagicMock
     ) -> None:
         """Test that our own messages are ignored."""
-        mock_time.side_effect = [0, 3, 6, 6, 17]
+        time_values = iter([0, 0, 0, 3, 6, 6, 17, 17])
+        mock_time.side_effect = lambda: next(time_values)
 
-        baseline_msg = self._create_message("100", "Hello", is_sent_by_viewer=True)
-        our_msg = self._create_message("101", "Anyone there?", is_sent_by_viewer=True)
-        their_msg = self._create_message("102", "Yeah!", is_sent_by_viewer=False)
+        baseline_msg = self._create_message(
+            "100", "Hello", is_sent_by_viewer=True,
+            timestamp=datetime(2024, 1, 15, 10, 0, 0)
+        )
+        # Our follow-up has timestamp > baseline, but should be ignored (is_sent_by_viewer)
+        our_msg = self._create_message(
+            "101", "Anyone there?", is_sent_by_viewer=True,
+            timestamp=datetime(2024, 1, 15, 10, 1, 0)
+        )
+        # Their reply has timestamp > baseline, should be detected
+        their_msg = self._create_message(
+            "102", "Yeah!", is_sent_by_viewer=False,
+            timestamp=datetime(2024, 1, 15, 10, 2, 0)
+        )
 
         self.mock_client.get_messages.side_effect = [
-            [baseline_msg],
+            [baseline_msg],  # Sync phase
             [our_msg, baseline_msg],  # Our follow-up - should be ignored
             [their_msg, our_msg, baseline_msg],  # Their reply
             [their_msg, our_msg, baseline_msg],
@@ -358,35 +395,34 @@ class TestWaitForReplyTool:
         """Test race condition: message arrives while we're responding.
 
         Scenario:
-        1. They send msg 100
-        2. We respond with msg 101
-        3. They send msg 102 WHILE we're responding (arrives before we call wait_for_reply)
+        1. They send msg 100 at T0
+        2. We respond with msg 101 at T1
+        3. They send msg 102 at T2 WHILE we're responding
         4. We call wait_for_reply - should detect msg 102!
 
-        The bug: if baseline is set to newest message overall (102), we miss it.
-        The fix: baseline should be OUR newest message (101), so 102 is detected.
+        With timestamp-based detection, any message from them with
+        timestamp > our baseline (T1) should be detected.
         """
-        # Use iterator to simulate time passing - buggy code will loop until timeout
-        # Each call increments by 100 seconds to quickly hit timeout
-        time_counter = {"value": 0}
+        time_values = iter([0, 0, 0, 3, 3, 15, 15])
+        mock_time.side_effect = lambda: next(time_values)
 
-        def mock_time_fn():
-            time_counter["value"] += 100
-            return time_counter["value"]
-
-        mock_time.side_effect = mock_time_fn
-
-        # Their message that triggered our response
-        their_first_msg = self._create_message("100", "Hey!", is_sent_by_viewer=False)
-        # Our response
-        our_response = self._create_message("101", "Hi there!", is_sent_by_viewer=True)
-        # Their message that arrived WHILE we were responding (race condition)
+        # Their first message at T0
+        their_first_msg = self._create_message(
+            "100", "Hey!", is_sent_by_viewer=False,
+            timestamp=datetime(2024, 1, 15, 10, 0, 0)
+        )
+        # Our response at T1 (this becomes our baseline)
+        our_response = self._create_message(
+            "101", "Hi there!", is_sent_by_viewer=True,
+            timestamp=datetime(2024, 1, 15, 10, 1, 0)
+        )
+        # Their message at T2 > T1 (should be detected!)
         their_race_msg = self._create_message(
-            "102", "Also wanted to ask...", is_sent_by_viewer=False
+            "102", "Also wanted to ask...", is_sent_by_viewer=False,
+            timestamp=datetime(2024, 1, 15, 10, 2, 0)
         )
 
         # When wait_for_reply is called, the thread already has all 3 messages
-        # (their race msg arrived before we started waiting)
         self.mock_client.get_messages.return_value = [
             their_race_msg,
             our_response,
@@ -401,9 +437,161 @@ class TestWaitForReplyTool:
             double_text_grace_period_seconds=10,
         )
 
-        # Should detect msg 102 even though it arrived before we started waiting
-        # Because it arrived AFTER our last sent message (101)
-        # BUG: Current code will return 'timeout' because it misses msg 102
+        # Should detect msg 102 because its timestamp (T2) > our baseline (T1)
         assert result.get("success") is True, f"Expected success, got: {result}"
         assert result["message_count"] == 1
         assert result["new_messages"][0]["text"] == "Also wanted to ask..."
+
+
+class TestSendAndCheckTool:
+    """Tests for the send_and_check tool."""
+
+    def setup_method(self) -> None:
+        """Set up test fixtures."""
+        self.mcp = FastMCP("test")
+        self.mock_client = MagicMock(spec=InstagramClient)
+        register_message_tools(self.mcp, self.mock_client)
+
+    def _get_tool_fn(self, name: str):
+        """Get tool function by name."""
+        for tool in self.mcp._tool_manager._tools.values():
+            if tool.name == name:
+                return tool.fn
+        return None
+
+    def _create_message(
+        self,
+        message_id: str,
+        text: str,
+        is_sent_by_viewer: bool = False,
+        username: str = "other_user",
+        timestamp: datetime | None = None,
+    ) -> DirectMessage:
+        """Create a mock DirectMessage for testing."""
+        return DirectMessage(
+            message_id=message_id,
+            thread_id="123456789",
+            sender=ThreadUser(user_id="999", username=username),
+            content=MessageContent(text=text, media_type=MediaType.TEXT),
+            timestamp=timestamp or datetime(2024, 1, 15, 10, 30, 0),
+            is_sent_by_viewer=is_sent_by_viewer,
+        )
+
+    @patch("instagram_mcp.tools.messages.time.sleep")
+    def test_send_and_check_no_interjection(self, mock_sleep: MagicMock) -> None:
+        """Test send_and_check when no interjection occurs."""
+        # Setup: their last message before we send
+        their_old_msg = self._create_message(
+            "100", "hey", is_sent_by_viewer=False,
+            timestamp=datetime(2024, 1, 15, 10, 0, 0)
+        )
+        # Our sent message
+        our_sent_msg = self._create_message(
+            "101", "what's up", is_sent_by_viewer=True,
+            timestamp=datetime(2024, 1, 15, 10, 1, 0)
+        )
+
+        # Mock reply_to_thread to return our message
+        self.mock_client.reply_to_thread.return_value = our_sent_msg
+
+        # Mock get_messages: first call (baseline), then synced state
+        self.mock_client.get_messages.side_effect = [
+            [their_old_msg],  # Pre-send baseline
+            [our_sent_msg, their_old_msg],  # Sync check - our msg visible
+            [our_sent_msg, their_old_msg],  # Post-send check - no new msgs
+        ]
+
+        tool_fn = self._get_tool_fn("send_and_check")
+        assert tool_fn is not None
+
+        result = tool_fn(thread_id="123456789", text="what's up")
+
+        assert result["success"] is True
+        assert result["message_id"] == "101"
+        assert result["has_interjection"] is False
+        assert result["interjection"] is None
+        assert result["synced"] is True
+
+    @patch("instagram_mcp.tools.messages.time.sleep")
+    def test_send_and_check_with_interjection(self, mock_sleep: MagicMock) -> None:
+        """Test send_and_check detects interjection from them."""
+        # Their old message (baseline)
+        their_old_msg = self._create_message(
+            "100", "hey", is_sent_by_viewer=False,
+            timestamp=datetime(2024, 1, 15, 10, 0, 0)
+        )
+        # Our sent message
+        our_sent_msg = self._create_message(
+            "101", "what's up", is_sent_by_viewer=True,
+            timestamp=datetime(2024, 1, 15, 10, 1, 0)
+        )
+        # Their interjection (sent AFTER our message)
+        their_interjection = self._create_message(
+            "102", "wait hold on", is_sent_by_viewer=False,
+            timestamp=datetime(2024, 1, 15, 10, 1, 5)
+        )
+
+        self.mock_client.reply_to_thread.return_value = our_sent_msg
+
+        self.mock_client.get_messages.side_effect = [
+            [their_old_msg],  # Pre-send baseline
+            [their_interjection, our_sent_msg, their_old_msg],  # Sync - our msg + their interjection
+            [their_interjection, our_sent_msg, their_old_msg],  # Post-send check
+        ]
+
+        tool_fn = self._get_tool_fn("send_and_check")
+        result = tool_fn(thread_id="123456789", text="what's up")
+
+        assert result["success"] is True
+        assert result["has_interjection"] is True
+        assert result["interjection"]["text"] == "wait hold on"
+        assert result["interjection"]["sender"] == "other_user"
+
+    @patch("instagram_mcp.tools.messages.time.sleep")
+    def test_send_and_check_sync_timeout(self, mock_sleep: MagicMock) -> None:
+        """Test send_and_check handles sync timeout gracefully."""
+        their_old_msg = self._create_message(
+            "100", "hey", is_sent_by_viewer=False,
+            timestamp=datetime(2024, 1, 15, 10, 0, 0)
+        )
+        our_sent_msg = self._create_message(
+            "101", "what's up", is_sent_by_viewer=True,
+            timestamp=datetime(2024, 1, 15, 10, 1, 0)
+        )
+
+        self.mock_client.reply_to_thread.return_value = our_sent_msg
+
+        # Message never appears in sync (simulating API delay)
+        self.mock_client.get_messages.return_value = [their_old_msg]
+
+        tool_fn = self._get_tool_fn("send_and_check")
+        result = tool_fn(
+            thread_id="123456789",
+            text="what's up",
+            sync_timeout_seconds=1,  # Short timeout for test
+        )
+
+        # Should still succeed but synced=False
+        assert result["success"] is True
+        assert result["synced"] is False
+
+    def test_send_and_check_send_failure(self) -> None:
+        """Test send_and_check handles send failure."""
+        self.mock_client.get_messages.return_value = []
+        self.mock_client.reply_to_thread.return_value = None  # Send failed
+
+        tool_fn = self._get_tool_fn("send_and_check")
+        result = tool_fn(thread_id="123456789", text="hello")
+
+        assert result["success"] is False
+        assert "error" in result
+
+    def test_send_and_check_exception(self) -> None:
+        """Test send_and_check handles exceptions."""
+        self.mock_client.get_messages.side_effect = Exception("API Error")
+
+        tool_fn = self._get_tool_fn("send_and_check")
+        result = tool_fn(thread_id="123456789", text="hello")
+
+        assert "error" in result
+        assert "API Error" in result["error"]
