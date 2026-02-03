@@ -183,6 +183,7 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
                         "sender": m.sender.username,
                         "text": m.content.text,
                         "is_sent_by_viewer": m.is_sent_by_viewer,
+                        "seen_since": m.seen_since,
                     }
                     for m in recent
                 ],

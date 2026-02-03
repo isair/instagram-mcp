@@ -299,14 +299,13 @@ def _convert_message(
     seen_since: int | None = None
     is_sent = msg.is_sent_by_viewer or False
     if is_sent and last_seen_at:
-        from datetime import datetime, timezone
-
         msg_id = int(msg.id)
-        now = datetime.now(timezone.utc)
+        # Use local time since instagrapi timestamps are naive local time
+        now = datetime.now()
 
         # Check if any other user has seen this message
-        for user_id, seen_info in last_seen_at.items():
-            if viewer_id and str(user_id) == str(viewer_id):
+        for uid, seen_info in last_seen_at.items():
+            if viewer_id and str(uid) == str(viewer_id):
                 continue  # Skip viewer's own seen info
             if hasattr(seen_info, "item_id") and seen_info.item_id:
                 their_last_seen_id = int(seen_info.item_id)
@@ -314,8 +313,9 @@ def _convert_message(
                     # They've seen this message
                     seen_time = seen_info.timestamp
                     if seen_time:
-                        if seen_time.tzinfo is None:
-                            seen_time = seen_time.replace(tzinfo=timezone.utc)
+                        # Strip timezone if present to compare naive datetimes
+                        if seen_time.tzinfo is not None:
+                            seen_time = seen_time.replace(tzinfo=None)
                         delta = now - seen_time
                         seen_since = int(delta.total_seconds() / 60)
                     break
