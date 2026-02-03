@@ -22,6 +22,12 @@ class MediaType(str, Enum):
     PROFILE = "profile"
     REEL_SHARE = "reel_share"
     STORY_SHARE = "story_share"
+    LIKE = "like"  # Message reaction/like
+    ACTION_LOG = "action_log"  # Thread activity (naming, adding users)
+    ANIMATED_MEDIA = "animated_media"  # GIF/sticker
+    RAVEN_MEDIA = "raven_media"  # Disappearing photo/video
+    PLACEHOLDER = "placeholder"  # Deleted message
+    XMA = "xma"  # Cross-media attachment (external links with previews)
     UNKNOWN = "unknown"
 
 

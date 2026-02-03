@@ -36,17 +36,22 @@ logger = logging.getLogger("instagram_mcp")
 def _fix_instagrapi_extractors() -> None:
     """Replace instagrapi extractors with fixed versions.
 
-    The instagrapi library doesn't convert visual_media.expiring_media_action_summary.timestamp
-    from microseconds to datetime, causing Pydantic validation to fail.
+    Fixes:
+    1. visual_media.expiring_media_action_summary.timestamp not converted from microseconds
+    2. action_log.description not extracted to text field for action_log messages
 
     This replaces the extractors entirely with fixed versions.
     """
+    import datetime as dt
+
     from instagrapi import extractors
     from instagrapi.extractors import (
         InstagramIdCodec,
         extract_direct_media,
         extract_media_v1,
+        extract_media_v1_xma,
     )
+    from instagrapi.types import DirectMessage as IGDirectMessage
     from instagrapi.types import ReplyMessage
 
     def fixed_extract_reply_message(data: dict[str, Any]) -> ReplyMessage:
@@ -81,9 +86,94 @@ def _fix_instagrapi_extractors() -> None:
 
         return ReplyMessage(**data)
 
-    # Replace the broken extractor
+    def fixed_extract_direct_message(data: dict[str, Any]) -> IGDirectMessage:
+        """Fixed version that extracts action_log description to text field."""
+        data["id"] = data.get("item_id")
+
+        if "replied_to_message" in data:
+            data["reply"] = fixed_extract_reply_message(data["replied_to_message"])
+        if "media_share" in data:
+            ms = data["media_share"]
+            if not ms.get("code"):
+                ms["code"] = InstagramIdCodec.encode(ms["id"])
+            data["media_share"] = extract_media_v1(ms)
+        if "media" in data:
+            data["media"] = extract_direct_media(data["media"])
+        if "voice_media" in data:
+            if "media" in data["voice_media"]:
+                data["media"] = extract_direct_media(data["voice_media"]["media"])
+
+        clip = data.get("clip", {})
+        if clip:
+            if "clip" in clip:
+                clip = clip.get("clip")
+            data["clip"] = extract_media_v1(clip)
+
+        xma_media_share = data.get("xma_media_share", {})
+        if xma_media_share:
+            data["xma_share"] = extract_media_v1_xma(xma_media_share[0])
+
+        # Convert main timestamp
+        data["timestamp"] = dt.datetime.fromtimestamp(int(data["timestamp"]) // 1_000_000)
+        data["user_id"] = str(data.get("user_id", ""))
+        data["client_context"] = data.get("client_context", "")
+
+        # Convert reaction timestamps
+        reactions = data.get("reactions", {})
+        if reactions and "emojis" in reactions:
+            for emoji_reaction in reactions["emojis"]:
+                if "timestamp" in emoji_reaction:
+                    emoji_reaction["timestamp"] = dt.datetime.fromtimestamp(
+                        int(emoji_reaction["timestamp"]) // 1_000_000
+                    )
+
+        # Convert visual media timestamps
+        visual_media = data.get("visual_media", {})
+        if visual_media and "media" in visual_media:
+            media = visual_media["media"]
+            emas = media.get("expiring_media_action_summary")
+            if emas and emas.get("timestamp"):
+                emas["timestamp"] = dt.datetime.fromtimestamp(
+                    int(emas["timestamp"]) // 1_000_000
+                )
+            # Convert image candidates URL expiration timestamps
+            img_versions = media.get("image_versions2")
+            if img_versions:
+                for candidate in img_versions.get("candidates", []):
+                    ts = candidate.get("url_expiration_timestamp_us")
+                    if ts:
+                        candidate["url_expiration_timestamp_us"] = dt.datetime.fromtimestamp(
+                            int(ts) // 1_000_000
+                        )
+            # Convert video versions URL expiration timestamps
+            for video_version in media.get("video_versions", []):
+                ts = video_version.get("url_expiration_timestamp_us")
+                if ts:
+                    video_version["url_expiration_timestamp_us"] = dt.datetime.fromtimestamp(
+                        int(ts) // 1_000_000
+                    )
+
+        # Convert top-level visual media expiring action summary timestamp
+        if visual_media:
+            emas = visual_media.get("expiring_media_action_summary")
+            if emas and emas.get("timestamp"):
+                emas["timestamp"] = dt.datetime.fromtimestamp(
+                    int(emas["timestamp"]) // 1_000_000
+                )
+
+        # FIX: Extract action_log description to text field
+        action_log = data.get("action_log")
+        if action_log and isinstance(action_log, dict):
+            description = action_log.get("description")
+            if description and not data.get("text"):
+                data["text"] = description
+
+        return IGDirectMessage(**data)
+
+    # Replace the broken extractors
     extractors.extract_reply_message = fixed_extract_reply_message
-    logger.debug("Replaced instagrapi extract_reply_message with fixed version")
+    extractors.extract_direct_message = fixed_extract_direct_message
+    logger.debug("Replaced instagrapi extractors with fixed versions")
 
 
 # Apply fix when module loads
@@ -140,7 +230,14 @@ def _determine_media_type(item: IGDirectMessage) -> MediaType:
         "media_share": MediaType.MEDIA_SHARE,
         "profile": MediaType.PROFILE,
         "clip": MediaType.REEL_SHARE,
+        "reel_share": MediaType.REEL_SHARE,
         "story_share": MediaType.STORY_SHARE,
+        "like": MediaType.LIKE,
+        "action_log": MediaType.ACTION_LOG,
+        "animated_media": MediaType.ANIMATED_MEDIA,
+        "raven_media": MediaType.RAVEN_MEDIA,
+        "placeholder": MediaType.PLACEHOLDER,
+        "xma_share": MediaType.XMA,
     }
 
     return type_mapping.get(item_type, MediaType.UNKNOWN)
