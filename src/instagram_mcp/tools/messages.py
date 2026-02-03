@@ -191,16 +191,20 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
             # Get current messages to establish baseline
             current_messages = client.get_messages(thread_id=thread_id, amount=10)
 
-            # Find the latest message ID we've seen
-            last_seen_id = None
-            if current_messages:
-                # Messages are ordered newest first, get the newest one
-                last_seen_id = current_messages[0].message_id
+            # Find OUR latest sent message as baseline (not the newest overall)
+            # This prevents a race condition where they send a message while we're
+            # responding - if we used the newest message overall as baseline, we'd
+            # miss their message because it would BE the baseline
+            our_last_message_id = None
+            for msg in current_messages:
+                if msg.is_sent_by_viewer:
+                    our_last_message_id = msg.message_id
+                    break
 
             logger.info(
-                "Waiting for reply in thread %s (last seen: %s)",
+                "Waiting for reply in thread %s (baseline: our msg %s)",
                 thread_id,
-                last_seen_id,
+                our_last_message_id,
             )
 
             timeout_seconds = timeout_minutes * 60
@@ -244,11 +248,11 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
                 # Poll for new messages
                 messages = client.get_messages(thread_id=thread_id, amount=10)
 
-                # Find new messages (not from us, newer than last_seen_id)
+                # Find new messages (not from us, newer than our last message)
                 new_messages = []
                 for msg in messages:
-                    # Stop if we hit our baseline
-                    if last_seen_id and msg.message_id == last_seen_id:
+                    # Stop if we hit our baseline (our last sent message)
+                    if our_last_message_id and msg.message_id == our_last_message_id:
                         break
                     # Only include messages NOT from us
                     if not msg.is_sent_by_viewer:

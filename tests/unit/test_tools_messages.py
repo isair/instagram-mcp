@@ -351,3 +351,61 @@ class TestWaitForReplyTool:
 
         assert "error" in result
         assert "Connection failed" in result["error"]
+
+    @patch("instagram_mcp.tools.messages.time.sleep")
+    @patch("instagram_mcp.tools.messages.time.time")
+    def test_wait_for_reply_race_condition(
+        self, mock_time: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        """Test race condition: message arrives while we're responding.
+
+        Scenario:
+        1. They send msg 100
+        2. We respond with msg 101
+        3. They send msg 102 WHILE we're responding (arrives before we call wait_for_reply)
+        4. We call wait_for_reply - should detect msg 102!
+
+        The bug: if baseline is set to newest message overall (102), we miss it.
+        The fix: baseline should be OUR newest message (101), so 102 is detected.
+        """
+        # Use iterator to simulate time passing - buggy code will loop until timeout
+        # Each call increments by 100 seconds to quickly hit timeout
+        time_counter = {"value": 0}
+
+        def mock_time_fn():
+            time_counter["value"] += 100
+            return time_counter["value"]
+
+        mock_time.side_effect = mock_time_fn
+
+        # Their message that triggered our response
+        their_first_msg = self._create_message("100", "Hey!", is_sent_by_viewer=False)
+        # Our response
+        our_response = self._create_message("101", "Hi there!", is_sent_by_viewer=True)
+        # Their message that arrived WHILE we were responding (race condition)
+        their_race_msg = self._create_message(
+            "102", "Also wanted to ask...", is_sent_by_viewer=False
+        )
+
+        # When wait_for_reply is called, the thread already has all 3 messages
+        # (their race msg arrived before we started waiting)
+        self.mock_client.get_messages.return_value = [
+            their_race_msg,
+            our_response,
+            their_first_msg,
+        ]
+
+        tool_fn = self._get_tool_fn("wait_for_reply")
+        result = tool_fn(
+            thread_id="123456789",
+            remind_double_text=True,
+            poll_interval_seconds=3,
+            double_text_grace_period_seconds=10,
+        )
+
+        # Should detect msg 102 even though it arrived before we started waiting
+        # Because it arrived AFTER our last sent message (101)
+        # BUG: Current code will return 'waiting' (checkpoint) because it misses msg 102
+        assert result.get("success") is True, f"Expected success, got: {result}"
+        assert result["message_count"] == 1
+        assert result["new_messages"][0]["text"] == "Also wanted to ask..."
