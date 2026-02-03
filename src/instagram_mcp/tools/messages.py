@@ -5,6 +5,7 @@ Instagram Direct Messages.
 """
 
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -145,3 +146,115 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
                 "Error deleting message %s from thread %s", message_id, thread_id
             )
             return {"error": str(e), "thread_id": thread_id, "message_id": message_id}
+
+    @mcp.tool()
+    def wait_for_reply(
+        thread_id: str,
+        timeout_minutes: int = 30,
+        poll_interval_seconds: int = 3,
+        double_text_grace_period_seconds: int = 10,
+    ) -> dict[str, Any]:
+        """Wait for new messages in a thread. Blocks until reply arrives or timeout.
+
+        This tool polls Instagram for new messages and waits for the other person
+        to respond. Once a response is detected, it waits an additional grace period
+        to catch double/triple texts, then returns all new messages at once.
+
+        Perfect for having natural conversations - call this after sending a message
+        to wait for their reply before responding.
+
+        Args:
+            thread_id: ID of the thread to monitor.
+            timeout_minutes: Maximum time to wait for a reply (default: 30).
+            poll_interval_seconds: How often to check for new messages (default: 3).
+            double_text_grace_period_seconds: Extra wait time after first reply
+                to catch rapid follow-up messages (default: 10).
+
+        Returns:
+            Object with 'success', 'new_messages' array, 'waited_seconds',
+            or 'timeout' if no reply received in time.
+        """
+        try:
+            # Get current messages to establish baseline
+            current_messages = client.get_messages(thread_id=thread_id, amount=10)
+
+            # Find the latest message ID we've seen
+            last_seen_id = None
+            if current_messages:
+                # Messages are ordered newest first, get the newest one
+                last_seen_id = current_messages[0].message_id
+
+            logger.info(
+                "Waiting for reply in thread %s (last seen: %s)",
+                thread_id,
+                last_seen_id,
+            )
+
+            timeout_seconds = timeout_minutes * 60
+            start_time = time.time()
+            first_new_message_time = None
+
+            while True:
+                elapsed = time.time() - start_time
+
+                # Check for timeout
+                if elapsed >= timeout_seconds:
+                    return {
+                        "timeout": True,
+                        "thread_id": thread_id,
+                        "waited_seconds": int(elapsed),
+                        "message": f"No reply received within {timeout_minutes} minutes",
+                    }
+
+                # Poll for new messages
+                messages = client.get_messages(thread_id=thread_id, amount=10)
+
+                # Find new messages (not from us, newer than last_seen_id)
+                new_messages = []
+                for msg in messages:
+                    # Stop if we hit our baseline
+                    if last_seen_id and msg.message_id == last_seen_id:
+                        break
+                    # Only include messages NOT from us
+                    if not msg.is_sent_by_viewer:
+                        new_messages.append(msg)
+
+                if new_messages:
+                    # First new message detected
+                    if first_new_message_time is None:
+                        first_new_message_time = time.time()
+                        logger.info(
+                            "New message detected, waiting %ds for double texts...",
+                            double_text_grace_period_seconds,
+                        )
+
+                    # Check if grace period has passed
+                    grace_elapsed = time.time() - first_new_message_time
+                    if grace_elapsed >= double_text_grace_period_seconds:
+                        # Grace period done, return all new messages
+                        # Reverse so oldest is first (natural reading order)
+                        new_messages.reverse()
+
+                        return {
+                            "success": True,
+                            "thread_id": thread_id,
+                            "new_messages": [
+                                {
+                                    "message_id": m.message_id,
+                                    "sender": m.sender.username,
+                                    "text": m.content.text,
+                                    "media_type": m.content.media_type.value,
+                                    "timestamp": m.timestamp.isoformat(),
+                                }
+                                for m in new_messages
+                            ],
+                            "message_count": len(new_messages),
+                            "waited_seconds": int(elapsed),
+                        }
+
+                # Sleep before next poll
+                time.sleep(poll_interval_seconds)
+
+        except Exception as e:
+            logger.exception("Error waiting for reply in thread %s", thread_id)
+            return {"error": str(e), "thread_id": thread_id}
