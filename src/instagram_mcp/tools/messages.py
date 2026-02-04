@@ -8,6 +8,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+from instagram_mcp.models.schemas import MediaType
+
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
@@ -254,7 +256,7 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
             return {"error": str(e), "thread_id": thread_id, "message_id": message_id}
 
     @mcp.tool()
-    def wait_for_reply(
+    def wait_for_reply(  # noqa: PLR0912
         thread_id: str,
         timeout_minutes: int = 5,
         poll_interval_seconds: int = 3,
@@ -340,6 +342,10 @@ def register_message_tools(mcp: "FastMCP", client: "InstagramClient") -> None:
                         continue
                     # Skip messages at or before our baseline timestamp
                     if baseline_timestamp and msg.timestamp <= baseline_timestamp:
+                        continue
+                    # Skip action_log messages (likes, reactions, thread updates)
+                    # These are not actual replies we want to respond to
+                    if msg.content.media_type == MediaType.ACTION_LOG:
                         continue
                     new_messages.append(msg)
 

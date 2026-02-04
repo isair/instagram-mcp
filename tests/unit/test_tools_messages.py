@@ -389,6 +389,75 @@ class TestWaitForReplyTool:
 
     @patch("instagram_mcp.tools.messages.time.sleep")
     @patch("instagram_mcp.tools.messages.time.time")
+    def test_wait_for_reply_ignores_action_logs(
+        self, mock_time: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        """Test that action_log messages (likes/reactions) are ignored.
+
+        Bug: When someone likes a message, wait_for_reply was returning
+        immediately with the like as a "new message". It should ignore
+        action_logs and keep waiting for actual text replies.
+
+        Scenario:
+        1. We send "schreib mir wenn es dir besser geht"
+        2. They like the message (action_log)
+        3. wait_for_reply should NOT return - should keep waiting
+        4. Only timeout after the specified duration
+        """
+        # Provide many time values to handle all the time.time() calls
+        # The bug causes it to enter grace period and call time.time() repeatedly
+        # After fix: should just poll until timeout without grace period nonsense
+        time_values = [0] * 5 + [3, 6, 9, 12, 61]  # Eventually timeout
+        time_iter = iter(time_values)
+        mock_time.side_effect = lambda: next(time_iter, 61)
+
+        # Our baseline message
+        baseline_msg = DirectMessage(
+            message_id="100",
+            thread_id="123456789",
+            sender=ThreadUser(user_id="999", username="you"),
+            content=MessageContent(
+                text="schreib mir wenn es dir besser geht",
+                media_type=MediaType.TEXT,
+            ),
+            timestamp=datetime(2024, 1, 15, 10, 23, 39),
+            is_sent_by_viewer=True,
+        )
+
+        # Their like (action_log) - should be IGNORED
+        like_action = DirectMessage(
+            message_id="101",
+            thread_id="123456789",
+            sender=ThreadUser(user_id="888", username="a.nymee"),
+            content=MessageContent(
+                text="Liked a message",
+                media_type=MediaType.ACTION_LOG,
+            ),
+            timestamp=datetime(2024, 1, 15, 10, 23, 50),  # After baseline
+            is_sent_by_viewer=False,
+        )
+
+        # Both polls return the same state: baseline + like
+        self.mock_client.get_messages.return_value = [like_action, baseline_msg]
+
+        tool_fn = self._get_tool_fn("wait_for_reply")
+        result = tool_fn(
+            thread_id="123456789",
+            timeout_minutes=1,  # 1 minute timeout
+            poll_interval_seconds=3,
+            double_text_grace_period_seconds=10,
+        )
+
+        # Should timeout, NOT return with success=True and the like as a message
+        assert result.get("timeout") is True, (
+            f"Expected timeout, but got success with action_log: {result}"
+        )
+        assert result.get("success") is not True, (
+            "action_log should not trigger successful reply detection"
+        )
+
+    @patch("instagram_mcp.tools.messages.time.sleep")
+    @patch("instagram_mcp.tools.messages.time.time")
     def test_wait_for_reply_race_condition(
         self, mock_time: MagicMock, mock_sleep: MagicMock
     ) -> None:
